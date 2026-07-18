@@ -35,7 +35,7 @@ The preamble is a continuous alternating tone at ~384 baud. The data burst follo
 SDRconnect / SoapySDR (250 ksps)
     └─ BurstCapture.cs       — amplitude gate, decimation 2M→250k, burst windowing
          └─ BurstDecoder.cs
-              ├─ Cf32Loader          — carrier offset measurement and removal
+              ├─ Cs16Loader          — carrier offset measurement and removal
               ├─ SignalAnalyser      — preamble detection, burst gating, parameter measurement
               ├─ BurstDecoder        — fine demod, eye diagram, M&M tracking, bit sampling
               └─ RinoDecoder         — NRZI decode, frame sync, CRC, position extraction
@@ -46,6 +46,16 @@ Separate display processes (read tracking/*.json — no decoding of their own):
     ├─ StatusMonitor.cs   (--monitor)  — console channel status table
     ├─ UsersMonitor.cs    (--users)    — console users/messages/polls display
     └─ WebDashboard.cs    (--web)      — browser dashboard combining both
+
+Offline calibration tool (reads/writes CS16 recordings, no decoding of its own):
+    └─ SignalAttenuator.cs (--attenuate) — simulate a weaker/more-distant
+                                            signal from an existing recording
+
+In-pipeline visual debugging (part of Gfskburstdecoder.cs, runs inline with
+every decode when enabled via ExportDecodeSteps in settings.json):
+    └─ DecodeStepExporter — writes each FM demod stage (coarse + fine
+                             passes) of every decoded burst to CS16, for
+                             before/after comparison in a spectrogram tool
 ```
 
 ## Cluster scanning
@@ -194,9 +204,13 @@ decoder. Run these in a **separate terminal window** while the decoder is
 running — they don't do any decoding themselves, they just read files the
 decoder writes to `tracking/` and redraw a live view roughly once a second.
 
-**Web dashboard (recommended)** — a single-page browser dashboard combining
-channel status and users/messages/polls in one modern, dark-themed view.
-Opens automatically in your default browser:
+**Web dashboard (recommended — this is the primary interface for the program).**
+A single-page browser dashboard covering everything you'd otherwise need the
+console modes or `tracking/*.json` files for: live channel status, a live map
+of decoded positions, live squelch control (including the auto-threshold
+feature), users, messages, poll requests, and burst audio playback, all in
+one dark-themed view that updates roughly once a second. Opens automatically
+in your default browser:
 ```
 RinoDecoder.exe --web
 ```
@@ -207,14 +221,51 @@ RinoDecoder.exe --web --host 0.0.0.0     # listen on your LAN, not just this mac
 ```
 This starts a small local HTTP server (no external dependencies — the page
 is embedded in the executable, so it works with no internet access) that
-serves the dashboard page plus two read-only JSON endpoints, `/api/status`
-and `/api/users`, which are just the same `status.json`/`users.json` files
-described below handed over HTTP. There's no login on these endpoints, so
-only pass `--host 0.0.0.0` (or another non-localhost address) on a network
-you trust — the default (`localhost`) only accepts connections from the
-same machine. On Windows, binding to a non-localhost host may also require
-an admin-elevated URL ACL reservation; the console will print the exact
-command if binding fails.
+serves the dashboard page plus its JSON/API endpoints, backed by the same
+`tracking/*.json` files described below. There's no login on these
+endpoints, so only pass `--host 0.0.0.0` (or another non-localhost address)
+on a network you trust — the default (`localhost`) only accepts connections
+from the same machine. On Windows, binding to a non-localhost host may also
+require an admin-elevated URL ACL reservation; the console will print the
+exact command if binding fails.
+
+**`AutoLaunchWebDashboard` (on by default) automatically launches this
+dashboard as the primary interface every time the main decoder starts** —
+you get the live map, channels, squelch, users, messages, and polls in your
+browser with no separate `--web` command needed. The main decoder process
+spawns a second `--web` process on startup and opens it in your default
+browser, same as running `--web` yourself. It's in `settings.json`:
+
+```json
+"ProgramSettings": {
+  "AutoLaunchWebDashboard": true
+}
+```
+
+Set it to `false` if you'd rather start the dashboard only when you
+explicitly run `RinoDecoder.exe --web` yourself.
+
+**Live squelch tuning (this is the most effective way to catch marginal signals).**
+The dashboard's "Live Squelch Control" card lets you drag `ThresholdSigmas`/`Threshold`
+live — no restart needed — via a `tracking/squelch_override.json` file the main
+process polls every ~500ms. This matters more than any `DecoderSettings` tuning:
+none of the demod-side settings above get a chance to run at all until
+`BurstCapture`'s amplitude squelch actually opens a capture window for a weak
+signal, and `Threshold`/`ThresholdSigmas` in `settings.json` are necessarily a
+static, one-size-fits-all guess.
+
+Check **Auto threshold (non-active channels)** to have the dashboard do this for
+you continuously: every second it averages `NoiseFloor` across whichever channels
+are currently idle, then sets `ThresholdSigmas = 1.0` (much more sensitive than the
+`2.0`–`4.0` typically used) and the absolute `Threshold` floor to `1.25×` that
+average noise floor — sitting the gate right at the edge of the actual noise
+rather than a fixed guess, while the absolute floor still guards against a
+runaway low noise-floor estimate causing false triggers on pure static. This
+adapts automatically as band conditions change and is generally far more
+effective for marginal signals than manually tuning the sliders (or
+`settings.json`) once and leaving it. Uncheck it to fall back to manual control
+of the sliders, and use **Reset to settings.json** to drop any override entirely
+and go back to the static configured values.
 
 **Channel status monitor (console)** — noise floor, signal level, SNR, and
 burst count per channel, plus which cluster is currently active:
@@ -315,6 +366,100 @@ Each placemark includes the callsign, latitude, longitude, altitude, and the tim
 
 ---
 
+## Calibrating with a simulated weak signal
+
+If you have a strong, cleanly-decoding capture (via `SaveRawIq`), you can synthesize a weaker version of it to test how well the decoder holds up at lower SNR — useful for tuning `DecoderSettings` before you actually encounter a marginal real-world signal.
+
+```
+RinoDecoder.exe --attenuate --in recording/raw_burst.cs16 --db 15
+```
+
+This does **not** just turn the recording down — a straight volume reduction scales the burst and whatever ambient noise was captured alongside it by the same amount, leaving the SNR unchanged. Instead, it:
+
+1. Measures the recording's existing noise floor (a low percentile of sample power across the whole file).
+2. Attenuates every sample by the requested dB.
+3. Adds back fresh, independent noise so the overall noise floor is restored to roughly what it originally was.
+
+The net effect is a recording where the burst is genuinely `N` dB weaker *relative to an unchanged noise floor* — the same thing that happens when a real transmitter moves farther away, not just a quieter recording of the same scenario.
+
+Flags:
+
+| Flag | Required | Description |
+|---|---|---|
+| `--in <path>` | No | Input CS16 file. Defaults to `recording/<RawBurstFile from settings.json>`. |
+| `--db <N>` | Yes | How many dB to attenuate the signal by (relative to its own noise floor). Must be ≥ 0. |
+| `--out <path>` | No | Output path. Defaults to `<input>_weak<N>dB.cs16` next to the input file. |
+| `--seed <N>` | No | Fixed RNG seed for the added noise, for reproducible test cases. Omit for a different result each run. |
+| `--steps` | No | Also export every intermediate processing stage as its own CS16 file, for visual inspection in a spectrogram tool — see [Visually inspecting each processing step](#visually-inspecting-each-processing-step) below. |
+
+To test the result, rename/copy the output file **and its `.meta.json` sidecar** (same base filename) to your configured `RawBurstFile`, and use the `[Y] Decode` prompt the decoder shows on startup when that file already exists (see [How to use](#how-to-use)), or point `RunFileDecoder`/`--` file-decode mode at it directly. The sidecar carries the sample rate the original capture used — `--attenuate` copies it forward automatically since attenuation doesn't change sample rate, but the decoder will fall back to `ProgramSettings.SampleRate` with a warning if it's missing, which is very likely wrong for a per-burst capture.
+
+**What this does and doesn't test:** the file-decode path feeds a loaded recording straight into the preamble/burst analyser and GFSK decoder — it does not re-run `BurstCapture`'s live amplitude squelch (`Threshold`/`ThresholdSigmas` in `ProgramSettings`), since file-replay already knows where the burst is. This tool is well-suited to calibrating `DecoderSettings` (preamble detection thresholds, baud measurement margins, bit-sampling robustness) at low SNR — it does **not** tell you whether `BurstCapture` would have triggered a live capture window for a burst this weak in the first place. That would require feeding the attenuated stream through the live capture pipeline instead.
+
+### Visually inspecting each processing step
+
+```
+RinoDecoder.exe --attenuate --in recording/raw_burst.cs16 --db 15 --steps
+```
+
+Adding `--steps` writes every intermediate stage of the attenuation process to its own CS16 file in a `<output>_steps/` subfolder, so you can load each one into a spectrogram viewer like [inspectrum](https://github.com/miek/inspectrum) and see exactly what each step did to the signal rather than only inspecting the final result. There are only two real signal-domain transforms in this tool, so three files are produced:
+
+| File | Contents |
+|---|---|
+| `01_input` | The untouched input, copied as-is — a baseline to compare the other two against. |
+| `02_gain_only` | After the attenuation gain is applied, but **before** noise is added back. Shows the burst shrinking alongside its own now-also-shrunk original noise — not yet a realistic weak signal by itself, but useful to see the gain step in isolation. |
+| `03_final` | Gain-scaled **and** noise restored — identical content to the primary `--out` file. This is the actual weak-signal simulation. |
+
+Each carries the same `.meta.json` sidecar as the main output (inspectrum itself doesn't need it — it takes a sample rate typed directly into its UI — but it keeps the files consistent with the rest of the pipeline if you want to load one straight into the decoder instead). A `README.txt` describing each file is also dropped in the folder. Step export failures are logged but don't affect the primary `--out` file, which is always written first regardless of `--steps`.
+
+---
+
+## Visually inspecting the decode pipeline itself
+
+`--attenuate --steps` (above) shows what happens to a signal *before* it reaches the decoder. `ExportDecodeSteps` shows what the decoder's own FM demodulation does to it internally — useful for judging, by eye, whether changing `FmDemodBandwidth`, `FmRfFilterTaps`, `FmBasebandFilterTaps`, `ManualLpfHz`, or `LpfBaudMultiplier` is actually sharpening the signal or introducing ringing/smearing, instead of only inferring it indirectly from whether CRC passes.
+
+Enable it in `settings.json`:
+```json
+"ExportDecodeSteps": true,
+"DecodeStepsDir": "decode_steps"
+```
+
+With this on, **every burst decoded** (live or via file-replay) writes a subfolder under `DecodeStepsDir` (named `<channel-or-filename>_<timestamp>/`) containing:
+
+| File | Contents |
+|---|---|
+| `01_input_iq` | The burst IQ exactly as handed to the decoder, before any demodulation. |
+| `02_coarse_rf_filtered_iq` | After the RF/channel filter, from the **coarse** demod pass used for preamble/burst segmentation (fixed ~3 kHz baseband cutoff). |
+| `03_coarse_discriminator` | Raw FM discriminator output from the coarse pass, before its baseband filter. |
+| `04_coarse_baseband` | After the coarse pass's baseband filter — this is the actual signal `SignalAnalyser` segments into preamble/burst regions. |
+| `05_fine_rf_filtered_iq` | After the RF/channel filter, from the **fine** demod pass used for bit sampling. |
+| `06_fine_discriminator` | Raw FM discriminator output from the fine pass, before its baseband filter. |
+| `07_fine_baseband` | After the fine pass's baseband filter (driven by `ManualLpfHz`/`LpfBaudMultiplier`) — this is the actual signal the eye-diagram and M&M bit sampler decode. |
+
+Steps 02/05 are genuine complex IQ, viewable directly. Steps 03/04/06/07 are past the FM discriminator, so they're no longer IQ — they're a real-valued instantaneous-frequency (Hz) track. To keep them viewable in an IQ-oriented tool like inspectrum anyway, each is stored as pseudo-IQ (the value in the I channel, Q left at 0) and independently normalized to its own peak, since the coarse and fine passes — and different bursts — don't share a common natural amplitude. Each file's `.meta.json` records the scale factor used (`ValueScaleHzPerFullScaleUnit`) so the normalized values can still be converted back to real Hz if needed; a `README.txt` in each burst's folder summarizes all of this alongside that burst's actually-measured baud/LPF/tone values.
+
+**Before/after workflow:** change a setting in `settings.json` (say, `FmBasebandFilterTaps`), replay the same saved capture (`[Y] Decode` on startup, or point file-decode mode at a `.cs16`/`.meta.json` pair), and compare `07_fine_baseband` between runs in inspectrum — same burst, same input, only the setting under test changed.
+
+This is off by default (`ExportDecodeSteps: false`) since it performs real disk I/O on every single burst when enabled — meant to be switched on deliberately for a tuning session using a saved capture (see [Calibrating with a simulated weak signal](#calibrating-with-a-simulated-weak-signal)), not left on during normal operation. Like the attenuator's archive files, these accumulate with no automatic cleanup.
+
+---
+
+## Recovering signals that are visible but not auto-detected
+
+If a weak burst is visibly present in a spectrogram (e.g. via `--attenuate --steps` or `ExportDecodeSteps`, above) but the decoder isn't finding it — segmentation never classifies a preamble or burst region — this is very likely the FM demodulator's **threshold effect**: below a certain input SNR, discriminator noise stops behaving like smooth background noise and turns into brief, extreme frequency "clicks." A handful of these can dominate an ordinary mean/variance calculation and make a real pattern statistically indistinguishable from noise to the code, even though a human eye (or a spectrogram, which integrates visually across time and frequency) can still pick it out.
+
+One setting addresses this directly:
+
+```json
+"CoarseSegmentationLpfHz": 1200
+```
+
+**`CoarseSegmentationLpfHz`** narrows the actual baseband filter feeding the segmentation statistics, directly reducing how much click noise reaches `Stats()`/`LowFreqConcentration` in the first place. Default (`0`) keeps the automatic `min(SampleRate/10, 3000 Hz)` cutoff; try narrowing it (clamped 200–8000 Hz) if a burst is visibly present in a spectrogram but segmentation isn't finding it. Don't push it too low — see its entry in the settings table below for why.
+
+This applies **only** to the coarse/segmentation pass — the actual bit-sampling signal `GfskDecoder` decodes from is never touched by it, so narrowing it can only help detection trigger; it cannot itself distort the final bit-level decode. Use your saved capture with `--attenuate` (optionally `--steps`) to try different values against the same weak signal repeatedly, and `ExportDecodeSteps`'s `04_coarse_baseband` file to see the effect directly before/after.
+
+---
+
 ## Troubleshooting
 
 **"soapy_bridge failed to open device" / decoder exits immediately on the Soapy backend**
@@ -365,18 +510,21 @@ Controls the SDR front end and capture pipeline.
 | `DspDebugLevel` | `1` | Verbosity. `0` = silent, `1` = decoded positions only, `2` = segment table + signal params, `3` = full bit-level debug including eye diagram and M&M tracking. |
 | `Threshold` | `0.0010` | Amplitude gate for burst detection in the capture pipeline. IQ magnitude must exceed this value to trigger a capture window. Raise if false triggers occur on a noisy channel; lower if weak signals are being missed. |
 | `ThresholdSigmas` | `4.0` | Per-channel squelch threshold as a multiple of that channel's measured noise floor. |
+| `SlotPreRollMs` | `100` | Milliseconds of pre-roll IQ (from the per-channel ring buffer) prepended to a burst when squelch first opens, so the very start of a burst isn't clipped by detection latency. |
+| `SlotHoldMs` | `3000` | Milliseconds squelch stays open (hang time) after signal drops below threshold before a burst is considered ended. |
 | `ChannelBandwidthHz` | `12000` | Per-channel filter bandwidth in Hz. |
-| `SaveRawIq` | `false` | If true, saves the raw IQ of the last detected burst to `RawBurstFile` for diagnostic use. |
-| `RawBurstFile` | `"raw_burst.cf32"` | Path for the saved raw burst IQ file (complex float32, interleaved I/Q). Used when `SaveRawIq` is enabled. |
+| `SaveRawIq` | `false` | If true, saves the raw IQ of the last detected burst to `RawBurstFile` for diagnostic use. Each detected burst overwrites the file — it always holds just the single most recent burst, not an accumulating log of the whole session. |
+| `RawBurstFile` | `"raw_burst.cs16"` | Path for the saved raw burst IQ file (CS16 — interleaved int16 I/Q). A `<RawBurstFile>.meta.json` sidecar is written alongside it recording the sample rate it was actually captured at — that's `BurstCapture`'s per-channel decimated rate (typically ~48–50 ksps), not the SDR's front-end `SampleRate` — since the file only contains one channel's already-channelized burst, not a wideband capture. The decoder's file-decode prompt reads this sidecar automatically; if it's missing (e.g. renamed/copied without it) decoding falls back to `SampleRate` with a warning, which is very likely wrong for a burst capture. `RawBurstFile` itself always holds just the latest burst — every save also archives a timestamped, per-channel copy (`raw_burst_<channel>_<timestamp>.cs16`, with its own `.meta.json`) in the same `recording/` folder so earlier bursts aren't lost. If a single continuous capture runs long enough to hit `BurstCapture`'s 30-second rolling cap (very unusual for a real ~270 ms RINO burst — this mainly guards against something else holding a channel's squelch open, like interference or voice traffic), all of its chunks are accumulated in memory and reassembled into one file once the squelch actually closes, rather than producing a separate file per 30-second chunk — capped at 20 chunks (~10 minutes) before forcing an early save, to bound memory use if a channel's squelch gets stuck open indefinitely. These archives accumulate indefinitely with no automatic cleanup — worth an occasional manual prune on a long-running session with frequent traffic. Used when `SaveRawIq` is enabled. |
 | `MaxDecodes` | `8` | Maximum number of concurrent burst decode attempts before new ones are skipped. |
 | `MonitorRepeaters` | `false` | Whether to also register repeater-input channels (labels ending in `R`, or `IsRepeater: true`). |
-| `ShowStatusDisplay` | `true` | Whether the decoder writes `tracking/status.json` for `--monitor`/`--web` to read. |
+| `ShowStatusDisplay` | `true` | Whether the decoder writes `tracking/status.json` for `--monitor`/`--web` to read. Must stay `true` for `--monitor` and the web dashboard's channel table/live squelch/auto-threshold to work — leave this on. |
+| `AutoLaunchWebDashboard` | `true` | If true, automatically launches the web dashboard (the primary interface — live map, channels, squelch, users, messages, polls) as a second `--web` process every time the main decoder starts, opening it in your default browser with no separate command needed. See [Live status displays](#live-status-displays). Set to `false` to only start the dashboard when you explicitly run `RinoDecoder.exe --web`. |
 
 ---
 
 ### DecoderSettings
 
-Controls the signal analyser and decoder. These are auto-calibrated per capture — most values are thresholds that define what counts as a valid preamble or burst.
+Controls the signal analyser and decoder. These are auto-calibrated per capture — most values are thresholds that define what counts as a valid preamble or burst. The settings most worth adjusting when tuning for weak signals are called out below the table.
 
 | Setting | Default | Description |
 |---|---|---|
@@ -384,17 +532,39 @@ Controls the signal analyser and decoder. These are auto-calibrated per capture 
 | `PostRollMs` | `0.003` | Seconds of IQ appended after the burst end. |
 | `MinBurstMs` | `265.0` | Minimum data burst duration in ms. The RINO data burst is ~270 ms; this is the lower acceptance bound. |
 | `MaxBurstMs` | `290.0` | Maximum data burst duration in ms. Upper acceptance bound. |
-| `MinPreambleMs` | `50.0` | Minimum preamble duration in ms to be considered valid. Short blips below this are ignored. |
-| `MaxPreambleMs` | `400.0` | Maximum preamble duration in ms. Longer regions are discarded (likely voice or another signal). |
-| `WindowSamplesMs` | `0.005` | Analysis window width in seconds (5 ms). Each window computes mean, standard deviation, and spectral characteristics of the demodulated signal. Smaller = finer time resolution but noisier estimates. |
+| `MinPreambleMs` | `80.0` | Minimum preamble duration in ms to be considered valid. Short blips below this are ignored. |
+| `MaxPreambleMs` | `600.0` | Maximum preamble duration in ms. Longer regions are discarded (likely voice or another signal). |
+| `WindowSamplesMs` | `0.005` | Analysis window width in seconds (5 ms). Each window computes mean, standard deviation, and spectral characteristics of the demodulated signal. Smaller = finer time resolution but noisier estimates — widening this slightly can stabilize classification at low SNR. |
 | `StrideSamplesMs` | `0.001` | Window stride in seconds (1 ms). Controls overlap between consecutive windows. Smaller strides give smoother detection at higher CPU cost. |
 | `BaudRatio` | `1.5625` | Ratio of data baud to preamble baud (= 25/16). The measured preamble baud is multiplied by this to derive the data baud rate. |
-| `ManualLpfHz` | `0.0` | Override the auto-calculated demod LPF cutoff in Hz. Set to 0 for automatic. Use for debugging only. |
-| `LpfBaudMultiplier` | `1.5` | Sets the demod LPF cutoff as a multiple of the data baud rate. Lower reduces noise but can distort symbols; higher passes more noise. |
+| `ManualLpfHz` | `1500` | **A positive value is a true override** — used directly as the demod LPF cutoff (safety-clamped to 100–20,000 Hz), skipping the automatic calculation entirely. **Set to `0` to enable automatic mode** (`DataBaud × LpfBaudMultiplier`, clamped to `[LpfMinHz, LpfMaxHz]`). |
+| `LpfBaudMultiplier` | `1.5` | Multiple of the measured data baud used for the automatic LPF cutoff. Only takes effect when `ManualLpfHz` is `0`. Lower reduces noise bandwidth into the bit decision (helps weak signals) but risks distorting/smearing symbols if pushed too low. |
+| `LpfMinHz` | `500` | Floor clamp on the automatic LPF cutoff. Only used when `ManualLpfHz` is `0`. |
+| `LpfMaxHz` | `10000` | Ceiling clamp on the automatic LPF cutoff. Only used when `ManualLpfHz` is `0`. |
 | `PreambleMaxStd` | `1500` | Maximum signal standard deviation (Hz) for a window to be classified as preamble. The preamble is a clean, stable tone; its std is typically 400–600 Hz. Noise and data bursts exceed this. |
-| `PreambleMinStd` | `200` | Minimum signal standard deviation for a preamble window. A silent carrier has std < 100 Hz and must be excluded. |
-| `PreambleLowFreqConc` | `0.5` | Minimum low-frequency concentration for a preamble window. Measures how much of the demodulated signal's power sits in low-frequency bins. A slow alternating tone scores high; noise and voice score low. |
-| `BurstStdMultiplier` | `2.0` | Burst detection gate. A post-preamble region is treated as a data burst candidate when its signal standard deviation exceeds `preamble_avg_std × BurstStdMultiplier`. Increase if preamble regions are being misidentified as bursts; decrease if weak bursts are being missed. |
+| `PreambleMinStd` | `75` | Minimum signal standard deviation for a preamble window. A silent carrier has std well below this and must be excluded. |
+| `PreambleLowFreqConc` | `0.5` | Minimum low-frequency concentration for a preamble window. Measures how much of the demodulated signal's power sits in low-frequency bins. A slow alternating tone scores high; noise and voice score low — this tends to drop as SNR falls. |
+| `BurstStdMultiplier` | `2.0` | Burst detection gate when a preamble WAS found. A post-preamble region is treated as a data burst candidate when its signal standard deviation exceeds `preamble_avg_std × BurstStdMultiplier`. Increase if preamble regions are being misidentified as bursts; decrease if weak bursts are being missed. |
+| `DirectBurstStdThreshold` | `1000` | Standard-deviation gate for the **no-preamble fallback scan** — used when no valid preamble is found at all. This becomes the *primary* segmentation path exactly when preamble detection is struggling (the weak-signal case), so it matters more than "fallback" suggests. Lower it if weak bursts without a clean preamble aren't being found. |
+| `FallbackDataBaud` | `615` | Nominal data baud used when no preamble is available to measure it from directly. |
+| `FallbackBaudRangePct` | `2` | ± percent range for the spectral refinement search around `FallbackDataBaud`. Set to `0` to skip refinement and use the nominal value outright. |
+| `FmDemodBandwidth` | `12000` | Pre-discriminator channel filter bandwidth in Hz, applied before FM demodulation. RINO's actual occupied bandwidth is roughly 7–8 kHz (Carson's rule, given ±1–3 kHz deviation and ~600 baud), so there's real headroom to narrow this for a genuine noise-bandwidth reduction before the signal even reaches the discriminator. |
+| `FmRfFilterTaps` | `151` | Tap count of the pre-discriminator RF/channel filter (`FmDemodBandwidth`'s filter). More taps = sharper cutoff for a given bandwidth, at the cost of eating more samples from each end of the burst (see note below) and (negligible) extra CPU. |
+| `FmBasebandFilterTaps` | `51` | Tap count of the post-discriminator baseband cleanup filter (the LPF driven by `ManualLpfHz`/`LpfBaudMultiplier`). **Under-provisioned by default for narrow cutoffs**: for a Hamming-windowed FIR the transition bandwidth is roughly `3.3 × sample_rate / taps`, which at a typical ~50 kHz decode rate and 51 taps works out to ≈3.2 kHz — wider than the ~900–1500 Hz cutoff this filter usually runs at. In practice that means narrowing `LpfBaudMultiplier`/`ManualLpfHz` alone has much less effect than the Hz number suggests unless this is also raised. |
+| `CoarseSegmentationLpfHz` | `0` | Baseband cutoff for the **coarse/segmentation** demod pass only — the pass `SignalAnalyser.Segment()` actually classifies preamble/burst regions from. This is a separate filter from `ManualLpfHz`/`LpfBaudMultiplier`, which only ever govern the **fine/bit-sampling** pass. `0` (default) keeps the original automatic behavior (`min(SampleRate/10, 3000 Hz)`), unchanged from before this setting existed. A positive value is a true override, safety-clamped to 200–8000 Hz — don't push it too low, since segmentation still needs to see the ~200 Hz preamble tone fundamental and the low/high-frequency-concentration bins up to 5000 Hz (`LowFreqConcentration`). Narrowing this is a genuine noise-bandwidth reduction for detection specifically, independent of anything that could affect the final bit-level decode. See [Recovering signals that are visible but not auto-detected](#recovering-signals-that-are-visible-but-not-auto-detected). |
+| `MmLoopBandwidth` | `0.035` | Loop bandwidth of the M&M bit-timing PLL. Lower values track timing more slowly but with less jitter pulled in from noise — usually worth reducing for weak signals, provided the eye-diagram seed used to initialize tracking is still clean enough to start from. |
+| `MmDamping` | `0.707` | Damping factor of the M&M bit-timing PLL (0.707 ≈ critically damped). Rarely needs adjustment on its own — usually tuned alongside `MmLoopBandwidth`. |
+| `ExportDecodeSteps` | `false` | If true, writes every intermediate FM-demod stage (coarse and fine passes) of every decoded burst to its own CS16 file under `DecodeStepsDir`, for visual before/after comparison in a spectrogram tool. See [Visually inspecting the decode pipeline itself](#visually-inspecting-the-decode-pipeline-itself). Performs real disk I/O per burst — meant for deliberate tuning sessions, not left-on normal operation. |
+| `DecodeStepsDir` | `"decode_steps"` | Folder (relative to the executable) that `ExportDecodeSteps` writes its per-burst subfolders into. |
+| `EnableLiveBurstAudio` | `false` | If true, exports a WAV of each detected burst's demodulated audio to `tracking/audio/` (`latest.wav`, plus a `manifest.json`), which the web dashboard's Burst Audio panel plays. |
+| `SaveBurstAudioFiles` | `false` | Only relevant when `EnableLiveBurstAudio` is true. If true, keeps a separate timestamped WAV per burst (up to `MaxBurstAudioFiles`, oldest pruned first) instead of just overwriting `latest.wav` on every burst. |
+| `MaxBurstAudioFiles` | `10` | Maximum number of saved burst WAV files kept in `tracking/audio/` when `SaveBurstAudioFiles` is true. `0` deletes all saved files (still keeps `latest.wav`). |
+
+**Most worth adjusting for weak signals**, roughly in order of impact: `LpfBaudMultiplier` together with `FmBasebandFilterTaps` (set `ManualLpfHz` to `0` first to enable automatic mode at all — raising taps is what actually lets a narrower `LpfBaudMultiplier` cutoff take effect once it is enabled, see the note above) and `FmDemodBandwidth`/`FmRfFilterTaps` for genuine noise-bandwidth reduction; `CoarseSegmentationLpfHz` for narrowing the *detection*-side noise bandwidth specifically (independent of everything above, which only affects the bit-sampling pass); `DirectBurstStdThreshold` and the `Preamble*` thresholds since they degrade first as SNR drops; `MmLoopBandwidth`/`MmDamping` for bit-timing robustness once demodulation itself is clean. Note that none of these affect whether a live capture triggers in the first place — that's `ProgramSettings.Threshold`/`ThresholdSigmas`, which gate `BurstCapture`'s squelch upstream of everything in this table (see the web dashboard's auto-threshold control, below, for the most effective way to tune that).
+
+**One coupling to watch:** `FirLpf` only computes valid output for the middle of its input — it zeroes `taps/2` samples at each end (a real edge effect, not a rounding quirk). The RF and baseband filters run back-to-back, so together they eat roughly `(FmRfFilterTaps + FmBasebandFilterTaps) / 2` samples from each end of the burst — with the defaults above, about 100 samples, against a default `PreRollMs`/`PostRollMs` margin of roughly 150 samples each. Raising tap counts for sharper filtering isn't free: push them too far without also raising `PreRollMs`/`PostRollMs` and you'll start losing real preamble/burst content at the edges rather than just margin.
+
+See [Calibrating with a simulated weak signal](#calibrating-with-a-simulated-weak-signal) for a way to test changes here without needing a real marginal signal.
 
 ---
 
