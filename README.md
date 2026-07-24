@@ -1,3 +1,9 @@
+<img width="1852" height="969" alt="SETTINGS" src="https://github.com/user-attachments/assets/e10f69ef-5ca5-4eb7-886a-f70a655d9136" />
+<img width="1852" height="821" alt="CHANNELS" src="https://github.com/user-attachments/assets/57431090-d9f3-4022-bf0b-8f149de3139b" />
+<img width="1852" height="966" alt="MAP" src="https://github.com/user-attachments/assets/269f723b-9711-4d7d-934a-19103ca3fd7c" />
+
+
+
 # Garmin RINO Burst Decoder
 
 A self-calibrating decoder for Garmin RINO position broadcasts sent over FRS/GMRS
