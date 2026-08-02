@@ -1,4 +1,4 @@
-**Download the latest release under the "releases" page or click here:** (https://github.com/hklinge32/GARMIN-RINO-DECODER-SDRConnect-SoapySDR/releases/tag/Rino_Decoder_V1.02)
+**Download the latest release under the "releases" page or click here:** https://github.com/hklinge32/GARMIN-RINO-DECODER-SDRConnect-SoapySDR/releases/tag/Rino_Decoder_V1.02
 
 # Garmin RINO Burst Decoder
 
