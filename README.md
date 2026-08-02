@@ -1,3 +1,5 @@
+**Download the latest release under the "releases" page or click here:** (https://github.com/hklinge32/GARMIN-RINO-DECODER-SDRConnect-SoapySDR/releases/tag/Rino_Decoder_V1.02)
+
 # Garmin RINO Burst Decoder
 
 A decoder for Garmin RINO position broadcasts transmitted over FRS/GMRS frequencies. Captures live radio signals and decodes position, callsign, altitude, and icon data in real time.
