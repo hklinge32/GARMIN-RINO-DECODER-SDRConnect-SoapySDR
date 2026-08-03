@@ -7,7 +7,7 @@ A decoder for Garmin RINO position broadcasts transmitted over FRS/GMRS frequenc
 The decoder supports two independent SDR backends — pick whichever matches your hardware:
 
 - **SDRconnect** — SDRplay's own capture application. Only works with SDRplay hardware (RSP1A, RSPdx, RSP1B, etc.), but requires no compilation on your part.
-- **SoapySDR** — a hardware-abstraction layer supporting a wide range of SDRs from different vendors (RTL-SDR, HackRF, Airspy, SDRplay, LimeSDR, PlutoSDR, USRP, and more). Requires building a small bridge library once, but isn't tied to one vendor.
+- **SoapySDR** — a hardware-abstraction layer supporting a wide range of SDRs from different vendors (RTL-SDR, HackRF, Airspy, SDRplay, LimeSDR, PlutoSDR, USRP, and more).
 
 See [Choosing a backend](#choosing-a-backend-sdrconnect-vs-soapysdr) below for the tradeoffs, and [Supported SDRs via SoapySDR](#supported-sdrs-via-soapysdr) for hardware-specific notes.
 
